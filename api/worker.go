@@ -806,6 +806,14 @@ func (w *Worker) GetTransactionFromBchainTx(bchainTx *bchain.Tx, height int, spe
 	if err != nil {
 		glog.Warningf("GetTxChainExtraData error %v, %v", err, bchainTx)
 	}
+	// Tron clears the gas fields, so the fee is the burned TRX from chainExtraData
+	if chainExtraData != nil && chainExtraData.PayloadType == bchain.ChainExtraPayloadTypeTron {
+		if fee, err := getTronFeesSat(chainExtraData.Payload); err != nil {
+			glog.Warningf("getTronFeesSat error %v, %v", err, bchainTx.Txid)
+		} else {
+			feesSat = *fee
+		}
+	}
 	r := &Tx{
 		Blockhash:        blockhash,
 		Blockheight:      height,
@@ -1110,7 +1118,7 @@ func (w *Worker) GetEthereumTokenURI(contract string, id string) (string, *bchai
 	if err != nil {
 		return "", nil, err
 	}
-	tokenId, ok := new(big.Int).SetString(id, 10)
+	tokenId, ok := parseTokenID(id)
 	if !ok {
 		return "", nil, errors.New("Invalid token id")
 	}
@@ -1123,6 +1131,18 @@ func (w *Worker) GetEthereumTokenURI(contract string, id string) (string, *bchai
 		return "", nil, err
 	}
 	return uri, ci, nil
+}
+
+// parseTokenID accepts a decimal uint256; the length bound (78 digits) runs before the superlinear decimal parse.
+func parseTokenID(id string) (*big.Int, bool) {
+	if len(id) > 78 {
+		return nil, false
+	}
+	tokenID, ok := new(big.Int).SetString(id, 10)
+	if !ok || tokenID.Sign() < 0 || tokenID.BitLen() > 256 {
+		return nil, false
+	}
+	return tokenID, true
 }
 
 // maxFilteredAddressScanNonMatching caps entries a filtered walk may skip; matches are already bounded by maxResults.
@@ -3869,4 +3889,18 @@ func (w *Worker) EstimateFee(blocks int, conservative bool) (big.Int, error) {
 		return w.chain.EstimateSmartFee(blocks, conservative)
 	}
 	return w.cachedEstimateFee(blocks, conservative)
+}
+
+func getTronFeesSat(data json.RawMessage) (*big.Int, error) {
+	var extra bchain.TronChainExtraData
+	if err := json.Unmarshal(data, &extra); err != nil {
+		return nil, err
+	}
+	fee := new(big.Int)
+	if extra.TotalFee != "" {
+		if _, ok := fee.SetString(extra.TotalFee, 10); !ok || fee.Sign() < 0 {
+			return nil, errors.Errorf("invalid Tron totalFee %q", extra.TotalFee)
+		}
+	}
+	return fee, nil
 }
